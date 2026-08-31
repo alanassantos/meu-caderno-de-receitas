@@ -9,6 +9,8 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://apis.google.com/js/api.js" async defer></script>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: 'Source Sans 3', 'Segoe UI', sans-serif; }
@@ -18,7 +20,12 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useMemo, useCallback } = React;
+    const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+    const GOOGLE_CLIENT_ID = "95231707243-bbe1s6rtllmnd1pb263839jkbg1dqnb6.apps.googleusercontent.com";
+    const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+    const DRIVE_BACKUP_NAME = "receitas-backup.json";
+    const LOCAL_STATE_KEY = "recipe_book_state_v2";
 
     const CATEGORIES = ["Doce", "Salgado", "Frio", "Quente", "Bebida", "Lanche"];
     const CUISINES = ["Brasileira", "Italiana", "Japonesa", "Mexicana", "Francesa", "Árabe", "Indiana", "Outra"];
@@ -55,13 +62,15 @@
       comment: "", ingredients: [], steps: "", sourceType: "outro", sourceLink: "", createdAt: Date.now()
     });
 
+    const DEFAULT_PREFERENCES = { search: "", category: "Todas", cuisine: "Todas", tested: "todas", makeable: false };
+
     function readStorage(key, fallback) {
       try { const content = localStorage.getItem(key); return content ? JSON.parse(content) : fallback; }
       catch { return fallback; }
     }
     function writeStorage(key, value) {
       try { localStorage.setItem(key, JSON.stringify(value)); }
-      catch { alert("Não foi possível salvar. Tente usar imagens menores ou faça um backup."); }
+      catch { alert("Não foi possível salvar localmente. Tente imagens menores ou exporte backup."); }
     }
     function fileToDataUrl(file) {
       return new Promise((resolve, reject) => {
@@ -72,7 +81,7 @@
       });
     }
     function sourceFromUrl(url) {
-      const text = url.toLowerCase();
+      const text = (url || "").toLowerCase();
       if (text.includes("tiktok")) return "tiktok";
       if (text.includes("instagram")) return "instagram";
       if (text.includes("pinterest") || text.includes("pin.it")) return "pinterest";
@@ -102,11 +111,97 @@
       recipe.ingredients.forEach(ingredient => {
         const data = nutritionForIngredient(ingredient);
         if (data) {
-          totals.kcal += data.kcal; totals.protein += data.protein;
-          totals.carbs += data.carbs; totals.fat += data.fat; totals.matched++;
+          totals.kcal += data.kcal;
+          totals.protein += data.protein;
+          totals.carbs += data.carbs;
+          totals.fat += data.fat;
+          totals.matched++;
         }
       });
       return totals;
+    }
+
+    function getAppState({ recipes, stock, shopping, checked, preferences, updatedAt }) {
+      return {
+        recipes,
+        stock,
+        shopping,
+        checked,
+        preferences,
+        updatedAt: Number(updatedAt) || Date.now()
+      };
+    }
+
+    function normalizeImportedState(raw) {
+      const safe = raw && typeof raw === "object" ? raw : {};
+      const prefs = safe.preferences && typeof safe.preferences === "object" ? safe.preferences : {};
+      return {
+        recipes: Array.isArray(safe.recipes) ? safe.recipes : [],
+        stock: Array.isArray(safe.stock) ? safe.stock : [],
+        shopping: Array.isArray(safe.shopping) ? safe.shopping : [],
+        checked: safe.checked && typeof safe.checked === "object" ? safe.checked : {},
+        preferences: {
+          ...DEFAULT_PREFERENCES,
+          search: typeof prefs.search === "string" ? prefs.search : "",
+          category: typeof prefs.category === "string" ? prefs.category : "Todas",
+          cuisine: typeof prefs.cuisine === "string" ? prefs.cuisine : "Todas",
+          tested: typeof prefs.tested === "string" ? prefs.tested : "todas",
+          makeable: !!prefs.makeable
+        },
+        updatedAt: Number(safe.updatedAt) || Date.now()
+      };
+    }
+
+    async function driveFetch(token, url, options = {}) {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          Authorization: "Bearer " + token,
+          ...(options.headers || {})
+        }
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(`Drive API (${response.status}): ${message || "falha"}`);
+      }
+      return response;
+    }
+
+    async function findDriveBackupFile(token) {
+      const query = encodeURIComponent(`name='${DRIVE_BACKUP_NAME}' and 'appDataFolder' in parents and trashed=false`);
+      const response = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${query}&spaces=appDataFolder&fields=files(id,name,modifiedTime)&pageSize=1`);
+      const json = await response.json();
+      return json.files && json.files.length ? json.files[0] : null;
+    }
+
+    async function downloadDriveBackup(token, fileId) {
+      const response = await driveFetch(token, `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+      const json = await response.json();
+      return normalizeImportedState(json);
+    }
+
+    async function uploadDriveBackup(token, payload, fileId) {
+      const boundary = "recipe-book-boundary-" + uid();
+      const metadata = fileId ? { name: DRIVE_BACKUP_NAME } : { name: DRIVE_BACKUP_NAME, parents: ["appDataFolder"] };
+      const body =
+`--${boundary}\r
+Content-Type: application/json; charset=UTF-8\r
+\r
+${JSON.stringify(metadata)}\r
+--${boundary}\r
+Content-Type: application/json\r
+\r
+${JSON.stringify(payload)}\r
+--${boundary}--`;
+      const method = fileId ? "PATCH" : "POST";
+      const endpoint = fileId
+        ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+        : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+      await driveFetch(token, endpoint, {
+        method,
+        headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+        body
+      });
     }
 
     const S = {
@@ -125,6 +220,14 @@
       danger: { background: "transparent", color: "#A8432B", border: "1px solid #E4D9C2", padding: ".5rem .8rem", borderRadius: "8px", fontWeight: 700, cursor: "pointer" },
       tag: (background, color) => ({ display: "inline-block", padding: ".15rem .55rem", borderRadius: "99px", fontSize: ".72rem", fontWeight: 700, background, color })
     };
+
+    function statusInfo(status) {
+      if (status === "saving") return { label: "Salvando no Drive", color: "#A8432B", bg: "#FBE2DC" };
+      if (status === "synced") return { label: "Conectado/sincronizado", color: "#2A5D2D", bg: "#E4F2E4" };
+      if (status === "pending") return { label: "Offline/alterações locais pendentes", color: "#7A5A17", bg: "#F4EACD" };
+      if (status === "error") return { label: "Erro", color: "#A31010", bg: "#FADFE0" };
+      return { label: "Não conectado", color: "#5B5140", bg: "#E7E1D2" };
+    }
 
     function NutritionCard({ recipe }) {
       const data = recipeNutrition(recipe);
@@ -149,26 +252,123 @@
     function App() {
       const [recipes, setRecipes] = useState([]);
       const [stock, setStock] = useState([]);
+      const [shopping, setShopping] = useState([]);
+      const [checked, setChecked] = useState({});
       const [tab, setTab] = useState("receitas");
       const [selectedId, setSelectedId] = useState(null);
       const [editing, setEditing] = useState(null);
-      const [search, setSearch] = useState("");
-      const [category, setCategory] = useState("Todas");
-      const [cuisine, setCuisine] = useState("Todas");
-      const [tested, setTested] = useState("todas");
-      const [makeable, setMakeable] = useState(false);
-      const [shopping, setShopping] = useState([]);
-      const [checked, setChecked] = useState({});
+      const [search, setSearch] = useState(DEFAULT_PREFERENCES.search);
+      const [category, setCategory] = useState(DEFAULT_PREFERENCES.category);
+      const [cuisine, setCuisine] = useState(DEFAULT_PREFERENCES.cuisine);
+      const [tested, setTested] = useState(DEFAULT_PREFERENCES.tested);
+      const [makeable, setMakeable] = useState(DEFAULT_PREFERENCES.makeable);
+      const [updatedAt, setUpdatedAt] = useState(Date.now());
 
-      useEffect(() => { setRecipes(readStorage("recipe_book_recipes", [])); setStock(readStorage("recipe_book_stock", [])); }, []);
-      useEffect(() => { writeStorage("recipe_book_recipes", recipes); }, [recipes]);
-      useEffect(() => { writeStorage("recipe_book_stock", stock); }, [stock]);
+      const [googleReady, setGoogleReady] = useState(false);
+      const [accessToken, setAccessToken] = useState("");
+      const [driveFileId, setDriveFileId] = useState("");
+      const [syncStatus, setSyncStatus] = useState("not_connected");
+      const [syncError, setSyncError] = useState("");
+      const [pendingSync, setPendingSync] = useState(false);
+      const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+
+      const tokenClientRef = useRef(null);
+      const saveDebounceRef = useRef(null);
+      const hydratedRef = useRef(false);
+      const firstTrackRef = useRef(true);
+      const syncingRef = useRef(false);
+
+      useEffect(() => {
+        const saved = readStorage(LOCAL_STATE_KEY, null);
+        if (saved) {
+          const restored = normalizeImportedState(saved);
+          setRecipes(restored.recipes);
+          setStock(restored.stock);
+          setShopping(restored.shopping);
+          setChecked(restored.checked);
+          setSearch(restored.preferences.search);
+          setCategory(restored.preferences.category);
+          setCuisine(restored.preferences.cuisine);
+          setTested(restored.preferences.tested);
+          setMakeable(restored.preferences.makeable);
+          setUpdatedAt(restored.updatedAt);
+        } else {
+          setRecipes(readStorage("recipe_book_recipes", []));
+          setStock(readStorage("recipe_book_stock", []));
+        }
+        hydratedRef.current = true;
+      }, []);
+
+      useEffect(() => {
+        if (!hydratedRef.current) return;
+        const preferences = { search, category, cuisine, tested, makeable };
+        const payload = getAppState({ recipes, stock, shopping, checked, preferences, updatedAt });
+        writeStorage(LOCAL_STATE_KEY, payload);
+        writeStorage("recipe_book_recipes", recipes);
+        writeStorage("recipe_book_stock", stock);
+      }, [recipes, stock, shopping, checked, search, category, cuisine, tested, makeable, updatedAt]);
+
+      useEffect(() => {
+        if (!hydratedRef.current) return;
+        if (firstTrackRef.current) {
+          firstTrackRef.current = false;
+          return;
+        }
+        setUpdatedAt(Date.now());
+        if (accessToken) setPendingSync(true);
+      }, [recipes, stock, shopping, checked, search, category, cuisine, tested, makeable]);
+
+      useEffect(() => {
+        function checkGoogleReady() {
+          if (window.google?.accounts?.oauth2 && window.gapi) {
+            setGoogleReady(true);
+            return true;
+          }
+          return false;
+        }
+        if (checkGoogleReady()) return;
+        const interval = setInterval(() => {
+          if (checkGoogleReady()) clearInterval(interval);
+        }, 400);
+        const timeout = setTimeout(() => clearInterval(interval), 15000);
+        return () => { clearInterval(interval); clearTimeout(timeout); };
+      }, []);
+
+      useEffect(() => {
+        if (!googleReady || tokenClientRef.current) return;
+        tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: DRIVE_SCOPE,
+          callback: async (response) => {
+            if (response.error) {
+              setSyncError("Falha no login do Google.");
+              setSyncStatus("error");
+              return;
+            }
+            setAccessToken(response.access_token);
+            setSyncError("");
+            await syncWithDrive(response.access_token, { startup: true });
+          }
+        });
+      }, [googleReady]);
+
+      useEffect(() => {
+        function handleOnline() { setIsOnline(true); }
+        function handleOffline() { setIsOnline(false); }
+        window.addEventListener("online", handleOnline);
+        window.addEventListener("offline", handleOffline);
+        return () => {
+          window.removeEventListener("online", handleOnline);
+          window.removeEventListener("offline", handleOffline);
+        };
+      }, []);
 
       const stockMap = useMemo(() => Object.fromEntries(stock.map(item => [normalize(item.name), item])), [stock]);
       const missing = useCallback(recipe => recipe.ingredients.filter(ingredient => {
         const available = stockMap[normalize(ingredient.name)];
         if (!available) return true;
-        const have = Number(available.qty) || 0, need = Number(ingredient.qty) || 0;
+        const have = Number(available.qty) || 0;
+        const need = Number(ingredient.qty) || 0;
         return available.unit === ingredient.unit ? have < need : have <= 0;
       }), [stockMap]);
 
@@ -183,37 +383,218 @@
 
       const shoppingItems = useMemo(() => {
         const result = {};
-        recipes.filter(recipe => shopping.includes(recipe.id)).forEach(recipe => missing(recipe).forEach(ingredient => {
-          const key = normalize(ingredient.name) + "|" + ingredient.unit;
-          if (!result[key]) result[key] = { ...ingredient, qty: 0, recipes: [] };
-          result[key].qty += Number(ingredient.qty) || 0;
-          if (!result[key].recipes.includes(recipe.title)) result[key].recipes.push(recipe.title || "Sem título");
-        }));
+        recipes.filter(recipe => shopping.includes(recipe.id)).forEach(recipe => {
+          missing(recipe).forEach(ingredient => {
+            const key = normalize(ingredient.name) + "|" + ingredient.unit;
+            if (!result[key]) result[key] = { ...ingredient, qty: 0, recipes: [] };
+            result[key].qty += Number(ingredient.qty) || 0;
+            if (!result[key].recipes.includes(recipe.title || "Sem título")) result[key].recipes.push(recipe.title || "Sem título");
+          });
+        });
         return Object.values(result);
       }, [recipes, shopping, missing]);
 
+      const syncStateLabel = useMemo(() => {
+        if (!accessToken) return statusInfo("not_connected");
+        if (syncStatus === "saving") return statusInfo("saving");
+        if (syncStatus === "error") return statusInfo("error");
+        if (!isOnline || pendingSync) return statusInfo("pending");
+        return statusInfo("synced");
+      }, [accessToken, syncStatus, isOnline, pendingSync]);
+
+      async function syncWithDrive(token, options = {}) {
+        if (!token) return;
+        if (!navigator.onLine) {
+          setPendingSync(true);
+          setSyncStatus("pending");
+          return;
+        }
+        if (syncingRef.current) return;
+        syncingRef.current = true;
+        setSyncStatus("saving");
+        setSyncError("");
+
+        try {
+          const local = getAppState({
+            recipes,
+            stock,
+            shopping,
+            checked,
+            preferences: { search, category, cuisine, tested, makeable },
+            updatedAt
+          });
+
+          let file = await findDriveBackupFile(token);
+          if (!file) {
+            await uploadDriveBackup(token, local, "");
+            file = await findDriveBackupFile(token);
+            if (file?.id) setDriveFileId(file.id);
+            setPendingSync(false);
+            setSyncStatus("synced");
+            return;
+          }
+
+          if (file?.id) setDriveFileId(file.id);
+          const remote = await downloadDriveBackup(token, file.id);
+          const remoteNewer = (Number(remote.updatedAt) || 0) > (Number(local.updatedAt) || 0);
+          const localNewer = (Number(local.updatedAt) || 0) > (Number(remote.updatedAt) || 0);
+
+          if (remoteNewer) {
+            const applyRemote = options.startup
+              ? confirm("Foi encontrado um backup mais recente no Google Drive. Deseja restaurar esse backup agora?")
+              : true;
+            if (applyRemote) {
+              setRecipes(remote.recipes);
+              setStock(remote.stock);
+              setShopping(remote.shopping);
+              setChecked(remote.checked);
+              setSearch(remote.preferences.search);
+              setCategory(remote.preferences.category);
+              setCuisine(remote.preferences.cuisine);
+              setTested(remote.preferences.tested);
+              setMakeable(remote.preferences.makeable);
+              setUpdatedAt(remote.updatedAt);
+            } else {
+              await uploadDriveBackup(token, local, file.id);
+            }
+          } else if (localNewer || options.forceUpload) {
+            await uploadDriveBackup(token, local, file.id);
+          }
+
+          setPendingSync(false);
+          setSyncStatus("synced");
+        } catch (error) {
+          setPendingSync(true);
+          setSyncStatus("error");
+          setSyncError("Não foi possível sincronizar com o Google Drive.");
+          console.error(error);
+        } finally {
+          syncingRef.current = false;
+        }
+      }
+
+      useEffect(() => {
+        if (!accessToken) return;
+        if (!pendingSync) return;
+        if (!isOnline) return;
+        if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = setTimeout(() => {
+          syncWithDrive(accessToken, { forceUpload: true });
+        }, 2000);
+        return () => {
+          if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+        };
+      }, [pendingSync, accessToken, isOnline, recipes, stock, shopping, checked, search, category, cuisine, tested, makeable, updatedAt]);
+
+      function loginGoogle() {
+        if (!tokenClientRef.current) {
+          alert("Google Identity Services ainda está carregando. Tente novamente em alguns segundos.");
+          return;
+        }
+        tokenClientRef.current.requestAccessToken({ prompt: accessToken ? "" : "consent" });
+      }
+
+      function logoutGoogle() {
+        if (accessToken && window.google?.accounts?.oauth2) {
+          window.google.accounts.oauth2.revoke(accessToken, () => {});
+        }
+        setAccessToken("");
+        setDriveFileId("");
+        setSyncStatus("not_connected");
+        setSyncError("");
+      }
+
       function saveRecipe(recipe) {
-        setRecipes(current => current.some(item => item.id === recipe.id) ? current.map(item => item.id === recipe.id ? recipe : item) : [recipe, ...current]);
-        setEditing(null); setTab("receitas");
+        setRecipes(current => current.some(item => item.id === recipe.id)
+          ? current.map(item => item.id === recipe.id ? recipe : item)
+          : [recipe, ...current]);
+        setEditing(null);
+        setTab("receitas");
       }
-      function removeRecipe(id) { if (confirm("Excluir esta receita?")) { setRecipes(current => current.filter(recipe => recipe.id !== id)); setSelectedId(null); } }
-      function saveMultiple(newRecipes) { setRecipes(current => [...newRecipes, ...current]); setTab("receitas"); }
+
+      function removeRecipe(id) {
+        if (!confirm("Excluir esta receita?")) return;
+        setRecipes(current => current.filter(recipe => recipe.id !== id));
+        setShopping(current => current.filter(recipeId => recipeId !== id));
+        setSelectedId(null);
+      }
+
+      function saveMultiple(newRecipes) {
+        setRecipes(current => [...newRecipes, ...current]);
+        setTab("receitas");
+      }
+
       function exportBackup() {
-        const blob = new Blob([JSON.stringify({ recipes, stock }, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob), link = document.createElement("a");
-        link.href = url; link.download = "backup-meu-caderno-de-receitas.json"; link.click(); URL.revokeObjectURL(url);
+        const payload = getAppState({
+          recipes,
+          stock,
+          shopping,
+          checked,
+          preferences: { search, category, cuisine, tested, makeable },
+          updatedAt
+        });
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "backup-meu-caderno-de-receitas.json";
+        link.click();
+        URL.revokeObjectURL(url);
       }
+
       function importBackup(event) {
-        const file = event.target.files?.[0]; if (!file) return;
+        const file = event.target.files?.[0];
+        if (!file) return;
         const reader = new FileReader();
-        reader.onload = () => { try { const data = JSON.parse(reader.result); if (data.recipes) setRecipes(data.recipes); if (data.stock) setStock(data.stock); alert("Backup importado!"); } catch { alert("Arquivo inválido."); } };
+        reader.onload = () => {
+          try {
+            const imported = normalizeImportedState(JSON.parse(reader.result));
+            setRecipes(imported.recipes);
+            setStock(imported.stock);
+            setShopping(imported.shopping);
+            setChecked(imported.checked);
+            setSearch(imported.preferences.search);
+            setCategory(imported.preferences.category);
+            setCuisine(imported.preferences.cuisine);
+            setTested(imported.preferences.tested);
+            setMakeable(imported.preferences.makeable);
+            setUpdatedAt(imported.updatedAt);
+            setPendingSync(!!accessToken);
+            alert("Backup importado com sucesso.");
+          } catch {
+            alert("Arquivo inválido.");
+          }
+        };
         reader.readAsText(file);
       }
+
       const selected = recipes.find(recipe => recipe.id === selectedId);
       const tabs = [["receitas", "Receitas"], ["estoque", "Estoque"], ["lista", "Lista de compras"], ["nova", "Nova receita"], ["importar", "Importar links"], ["backup", "Backup"]];
+
       return <div style={S.page}>
-        <header style={S.header}><h1 style={S.title}>Meu caderno de receitas</h1><p style={S.subtitle}>Receitas, estoque, calorias e lista de compras em um só lugar</p></header>
-        <nav style={S.nav}>{tabs.map(([id, label]) => <button key={id} style={S.navBtn(tab === id)} onClick={() => { setTab(id); setSelectedId(null); if (id === "nova") setEditing(newRecipe()); }}>{label}</button>)}</nav>
+        <header style={S.header}>
+          <h1 style={S.title}>Meu caderno de receitas</h1>
+          <p style={S.subtitle}>Receitas, estoque, calorias e lista de compras em um só lugar</p>
+          <div style={{ marginTop: "1rem", display: "flex", flexWrap: "wrap", gap: ".5rem", alignItems: "center" }}>
+            <span style={{ ...S.tag(syncStateLabel.bg, syncStateLabel.color), fontSize: ".78rem" }}>{syncStateLabel.label}</span>
+            {!accessToken && <button style={S.secondary} onClick={loginGoogle}>Entrar com Google</button>}
+            {accessToken && <>
+              <button style={S.secondary} onClick={() => syncWithDrive(accessToken, { forceUpload: true })}>Sincronizar agora</button>
+              <button style={S.secondary} onClick={logoutGoogle}>Sair</button>
+            </>}
+            {driveFileId && <span style={{ fontSize: ".75rem", color: "#C9BFA8" }}>Backup remoto: {DRIVE_BACKUP_NAME}</span>}
+          </div>
+          {syncError && <p style={{ margin: ".6rem 0 0", color: "#F7C6C8", fontSize: ".83rem" }}>{syncError}</p>}
+        </header>
+
+        <nav style={S.nav}>
+          {tabs.map(([id, label]) => <button key={id} style={S.navBtn(tab === id)} onClick={() => {
+            setTab(id);
+            setSelectedId(null);
+            if (id === "nova") setEditing(newRecipe());
+          }}>{label}</button>)}
+        </nav>
+
         <main style={S.wrap}>
           {tab === "receitas" && !selected && <RecipeGrid recipes={shownRecipes} total={recipes.length} missing={missing} search={search} setSearch={setSearch} category={category} setCategory={setCategory} cuisine={cuisine} setCuisine={setCuisine} tested={tested} setTested={setTested} makeable={makeable} setMakeable={setMakeable} open={setSelectedId} />}
           {tab === "receitas" && selected && <RecipeDetail recipe={selected} missing={missing(selected)} back={() => setSelectedId(null)} edit={() => { setEditing(selected); setTab("nova"); }} remove={() => removeRecipe(selected.id)} toggle={() => setRecipes(current => current.map(recipe => recipe.id === selected.id ? { ...recipe, tested: !recipe.tested } : recipe))} addShopping={() => { setShopping(current => current.includes(selected.id) ? current : [...current, selected.id]); setTab("lista"); }} />}
@@ -221,7 +602,7 @@
           {tab === "lista" && <Shopping recipes={recipes} shopping={shopping} setShopping={setShopping} items={shoppingItems} checked={checked} setChecked={setChecked} />}
           {tab === "nova" && editing && <RecipeForm recipe={editing} setRecipe={setEditing} save={saveRecipe} cancel={() => { setEditing(null); setTab("receitas"); }} />}
           {tab === "importar" && <BulkImport save={saveMultiple} />}
-          {tab === "backup" && <Backup exportBackup={exportBackup} importBackup={importBackup} />}
+          {tab === "backup" && <Backup exportBackup={exportBackup} importBackup={importBackup} accessToken={!!accessToken} syncNow={() => accessToken && syncWithDrive(accessToken, { forceUpload: true })} />}
         </main>
       </div>;
     }
@@ -238,55 +619,199 @@
         {!total && <p style={{ color: "#8A7F68", marginTop: "2rem" }}>Ainda não há receitas. Use “Nova receita” ou “Importar links” para começar.</p>}
         {!!total && !recipes.length && <p style={{ color: "#8A7F68", marginTop: "2rem" }}>Nenhuma receita encontrada com esses filtros.</p>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "1rem", marginTop: "1.25rem" }}>
-          {recipes.map(recipe => { const absent = missing(recipe), nutrition = recipeNutrition(recipe); return <article key={recipe.id} onClick={() => open(recipe.id)} style={{ ...S.card, cursor: "pointer" }}>
-            <div style={{ height: "130px", background: recipe.photo ? `url(${recipe.photo}) center/cover` : "#EEE3CC", display: "grid", placeItems: "center", color: "#B7A87F", fontSize: ".8rem" }}>{!recipe.photo && "Sem foto"}</div>
-            <div style={{ padding: ".8rem" }}><div style={{ display: "flex", gap: ".35rem", flexWrap: "wrap", marginBottom: ".45rem" }}><span style={S.tag("#F1E3C6", "#7A5A17")}>{recipe.category}</span><span style={S.tag("#E7E1D2", "#5B5140")}>{recipe.cuisine}</span>{recipe.tested && <span style={S.tag("#DCEBD8", "#356534")}>Testada</span>}</div>
-            <div style={{ fontWeight: 700, fontSize: "1.04rem" }}>{recipe.title || "Sem título"}</div><div style={{ color: absent.length ? "#A8432B" : "#356534", fontSize: ".79rem", marginTop: ".3rem" }}>{absent.length ? `Faltam ${absent.length} ingrediente(s)` : "Você tem tudo"}</div>{nutrition.total > 0 && <div style={{ color: "#8A7F68", fontSize: ".78rem", marginTop: ".2rem" }}>~{Math.round(nutrition.kcal)} kcal</div>}</div>
-          </article>; })}
+          {recipes.map(recipe => {
+            const absent = missing(recipe);
+            const nutrition = recipeNutrition(recipe);
+            return <article key={recipe.id} onClick={() => open(recipe.id)} style={{ ...S.card, cursor: "pointer" }}>
+              <div style={{ height: "130px", background: recipe.photo ? `url(${recipe.photo}) center/cover` : "#EEE3CC", display: "grid", placeItems: "center", color: "#B7A87F", fontSize: ".8rem" }}>{!recipe.photo && "Sem foto"}</div>
+              <div style={{ padding: ".8rem" }}>
+                <div style={{ display: "flex", gap: ".35rem", flexWrap: "wrap", marginBottom: ".45rem" }}>
+                  <span style={S.tag("#F1E3C6", "#7A5A17")}>{recipe.category}</span>
+                  <span style={S.tag("#E7E1D2", "#5B5140")}>{recipe.cuisine}</span>
+                  {recipe.tested && <span style={S.tag("#DCEBD8", "#356534")}>Testada</span>}
+                </div>
+                <div style={{ fontWeight: 700, fontSize: "1.04rem" }}>{recipe.title || "Sem título"}</div>
+                <div style={{ color: absent.length ? "#A8432B" : "#356534", fontSize: ".79rem", marginTop: ".3rem" }}>{absent.length ? `Faltam ${absent.length} ingrediente(s)` : "Você tem tudo"}</div>
+                {nutrition.total > 0 && <div style={{ color: "#8A7F68", fontSize: ".78rem", marginTop: ".2rem" }}>~{Math.round(nutrition.kcal)} kcal</div>}
+              </div>
+            </article>;
+          })}
         </div>
       </div>;
     }
 
     function RecipeDetail({ recipe, missing, back, edit, remove, toggle, addShopping }) {
-      return <div><button style={S.secondary} onClick={back}>← Voltar</button><section style={{ ...S.card, marginTop: "1rem", padding: "1.25rem" }}>
-        {recipe.photo && <img src={recipe.photo} alt={recipe.title} style={{ width: "100%", maxHeight: "320px", objectFit: "cover", borderRadius: "10px", marginBottom: "1rem" }} />}
-        <div style={{ display: "flex", gap: ".4rem", flexWrap: "wrap" }}><span style={S.tag("#F1E3C6", "#7A5A17")}>{recipe.category}</span><span style={S.tag("#E7E1D2", "#5B5140")}>{recipe.cuisine}</span>{recipe.tested && <span style={S.tag("#DCEBD8", "#356534")}>Testada</span>}</div>
-        <h2 style={{ fontFamily: "Fraunces, Georgia, serif", margin: ".7rem 0" }}>{recipe.title}</h2><NutritionCard recipe={recipe} />
-        <h3>Ingredientes</h3><ul>{recipe.ingredients.map(item => <li key={item.id} style={{ color: missing.some(absent => absent.id === item.id) ? "#A8432B" : "inherit", margin: ".25rem 0" }}>{item.qty} {item.unit} de {item.name} {missing.some(absent => absent.id === item.id) && "· falta"}</li>)}</ul>
-        {recipe.steps && <><h3>Modo de preparo</h3><p style={{ whiteSpace: "pre-wrap" }}>{recipe.steps}</p></>}
-        {recipe.comment && <><h3>Meus comentários</h3><p style={{ whiteSpace: "pre-wrap", fontStyle: "italic" }}>{recipe.comment}</p></>}
-        {recipe.sourceLink && <p><b>Fonte:</b> <a href={recipe.sourceLink} target="_blank" rel="noreferrer" style={{ color: "#A8432B" }}>{SOURCES.find(item => item.id === recipe.sourceType)?.label || "Abrir link original"}</a></p>}
-        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: "1rem" }}><button style={S.primary} onClick={toggle}>{recipe.tested ? "Marcar como não testada" : "Marcar como testada"}</button><button style={S.secondary} onClick={addShopping}>Adicionar à lista</button><button style={S.secondary} onClick={edit}>Editar</button><button style={S.danger} onClick={remove}>Excluir</button></div>
-      </section></div>;
+      return <div>
+        <button style={S.secondary} onClick={back}>← Voltar</button>
+        <section style={{ ...S.card, marginTop: "1rem", padding: "1.25rem" }}>
+          {recipe.photo && <img src={recipe.photo} alt={recipe.title} style={{ width: "100%", maxHeight: "320px", objectFit: "cover", borderRadius: "10px", marginBottom: "1rem" }} />}
+          <div style={{ display: "flex", gap: ".4rem", flexWrap: "wrap" }}>
+            <span style={S.tag("#F1E3C6", "#7A5A17")}>{recipe.category}</span>
+            <span style={S.tag("#E7E1D2", "#5B5140")}>{recipe.cuisine}</span>
+            {recipe.tested && <span style={S.tag("#DCEBD8", "#356534")}>Testada</span>}
+          </div>
+          <h2 style={{ fontFamily: "Fraunces, Georgia, serif", margin: ".7rem 0" }}>{recipe.title}</h2>
+          <NutritionCard recipe={recipe} />
+          <h3>Ingredientes</h3>
+          <ul>{recipe.ingredients.map(item => <li key={item.id} style={{ color: missing.some(absent => absent.id === item.id) ? "#A8432B" : "inherit", margin: ".25rem 0" }}>{item.qty} {item.unit} de {item.name} {missing.some(absent => absent.id === item.id) && "· falta"}</li>)}</ul>
+          {recipe.steps && <><h3>Modo de preparo</h3><p style={{ whiteSpace: "pre-wrap" }}>{recipe.steps}</p></>}
+          {recipe.comment && <><h3>Meus comentários</h3><p style={{ whiteSpace: "pre-wrap", fontStyle: "italic" }}>{recipe.comment}</p></>}
+          {recipe.sourceLink && <p><b>Fonte:</b> <a href={recipe.sourceLink} target="_blank" rel="noreferrer" style={{ color: "#A8432B" }}>{SOURCES.find(item => item.id === recipe.sourceType)?.label || "Abrir link original"}</a></p>}
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: "1rem" }}>
+            <button style={S.primary} onClick={toggle}>{recipe.tested ? "Marcar como não testada" : "Marcar como testada"}</button>
+            <button style={S.secondary} onClick={addShopping}>Adicionar à lista</button>
+            <button style={S.secondary} onClick={edit}>Editar</button>
+            <button style={S.danger} onClick={remove}>Excluir</button>
+          </div>
+        </section>
+      </div>;
     }
 
     function Stock({ stock, setStock }) {
       function update(id, patch) { setStock(current => current.map(item => item.id === id ? { ...item, ...patch } : item)); }
-      return <div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}><h2 style={{ fontFamily: "Fraunces, Georgia, serif", margin: 0 }}>O que tenho em casa</h2><button style={S.primary} onClick={() => setStock(current => [...current, { id: uid(), name: "", qty: "", unit: "g" }])}>+ Adicionar</button></div><p style={{ color: "#8A7F68" }}>Cadastre os ingredientes e as quantidades disponíveis. O site cruza isso com as receitas.</p>{!stock.length && <p style={{ color: "#8A7F68" }}>Seu estoque está vazio.</p>}<div style={{ display: "grid", gap: ".5rem" }}>{stock.map(item => <div key={item.id} style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><input style={{ ...S.input, flex: "2 1 180px" }} placeholder="Ingrediente" value={item.name} onChange={event => update(item.id, { name: event.target.value })} /><input style={{ ...S.input, flex: "1 1 80px" }} type="number" placeholder="Qtd" value={item.qty} onChange={event => update(item.id, { qty: event.target.value })} /><select style={{ ...S.input, flex: "1 1 110px" }} value={item.unit} onChange={event => update(item.id, { unit: event.target.value })}>{UNITS.map(unit => <option key={unit}>{unit}</option>)}</select><button style={S.danger} onClick={() => setStock(current => current.filter(value => value.id !== item.id))}>Remover</button></div>)}</div></div>;
+      return <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
+          <h2 style={{ fontFamily: "Fraunces, Georgia, serif", margin: 0 }}>O que tenho em casa</h2>
+          <button style={S.primary} onClick={() => setStock(current => [...current, { id: uid(), name: "", qty: "", unit: "g" }])}>+ Adicionar</button>
+        </div>
+        <p style={{ color: "#8A7F68" }}>Cadastre os ingredientes e as quantidades disponíveis. O site cruza isso com as receitas.</p>
+        {!stock.length && <p style={{ color: "#8A7F68" }}>Seu estoque está vazio.</p>}
+        <div style={{ display: "grid", gap: ".5rem" }}>
+          {stock.map(item => <div key={item.id} style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+            <input style={{ ...S.input, flex: "2 1 180px" }} placeholder="Ingrediente" value={item.name} onChange={event => update(item.id, { name: event.target.value })} />
+            <input style={{ ...S.input, flex: "1 1 80px" }} type="number" placeholder="Qtd" value={item.qty} onChange={event => update(item.id, { qty: event.target.value })} />
+            <select style={{ ...S.input, flex: "1 1 110px" }} value={item.unit} onChange={event => update(item.id, { unit: event.target.value })}>{UNITS.map(unit => <option key={unit}>{unit}</option>)}</select>
+            <button style={S.danger} onClick={() => setStock(current => current.filter(value => value.id !== item.id))}>Remover</button>
+          </div>)}
+        </div>
+      </div>;
     }
 
     function Shopping({ recipes, shopping, setShopping, items, checked, setChecked }) {
-      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Lista de compras</h2><p style={{ color: "#8A7F68" }}>Selecione as receitas. A lista mostra somente o que falta e para qual receita serve.</p><div style={{ display: "flex", flexWrap: "wrap", gap: ".4rem", marginBottom: "1.2rem" }}>{recipes.map(recipe => <button key={recipe.id} style={shopping.includes(recipe.id) ? S.primary : S.secondary} onClick={() => setShopping(current => current.includes(recipe.id) ? current.filter(id => id !== recipe.id) : [...current, recipe.id])}>{recipe.title || "Sem título"}</button>)}</div>{!items.length && <p style={{ color: "#8A7F68" }}>Selecione receitas acima para gerar a lista.</p>}<div style={{ display: "grid", gap: ".5rem" }}>{items.map((item, index) => { const key = `${item.name}|${item.unit}`, done = checked[key]; return <label key={index} style={{ ...S.card, padding: ".7rem .9rem", display: "flex", gap: ".7rem", alignItems: "center", opacity: done ? .55 : 1 }}><input type="checkbox" checked={!!done} onChange={event => setChecked(current => ({ ...current, [key]: event.target.checked }))} /><div><div style={{ fontWeight: 700, textDecoration: done ? "line-through" : "none" }}>{item.qty} {item.unit} de {item.name}</div><div style={{ fontSize: ".78rem", color: "#8A7F68" }}>Para: {item.recipes.join(", ")}</div></div></label>; })}</div></div>;
+      return <div>
+        <h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Lista de compras</h2>
+        <p style={{ color: "#8A7F68" }}>Selecione as receitas. A lista mostra somente o que falta e para qual receita serve.</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: ".4rem", marginBottom: "1.2rem" }}>
+          {recipes.map(recipe => <button key={recipe.id} style={shopping.includes(recipe.id) ? S.primary : S.secondary} onClick={() => setShopping(current => current.includes(recipe.id) ? current.filter(id => id !== recipe.id) : [...current, recipe.id])}>{recipe.title || "Sem título"}</button>)}
+        </div>
+        {!items.length && <p style={{ color: "#8A7F68" }}>Selecione receitas acima para gerar a lista.</p>}
+        <div style={{ display: "grid", gap: ".5rem" }}>
+          {items.map((item, index) => {
+            const key = `${item.name}|${item.unit}`;
+            const done = checked[key];
+            return <label key={index} style={{ ...S.card, padding: ".7rem .9rem", display: "flex", gap: ".7rem", alignItems: "center", opacity: done ? .55 : 1 }}>
+              <input type="checkbox" checked={!!done} onChange={event => setChecked(current => ({ ...current, [key]: event.target.checked }))} />
+              <div>
+                <div style={{ fontWeight: 700, textDecoration: done ? "line-through" : "none" }}>{item.qty} {item.unit} de {item.name}</div>
+                <div style={{ fontSize: ".78rem", color: "#8A7F68" }}>Para: {item.recipes.join(", ")}</div>
+              </div>
+            </label>;
+          })}
+        </div>
+      </div>;
     }
 
     function RecipeForm({ recipe, setRecipe, save, cancel }) {
       function patch(fields) { setRecipe(current => ({ ...current, ...fields })); }
-      async function addPhoto(event) { const file = event.target.files?.[0]; if (file) patch({ photo: await fileToDataUrl(file) }); }
-      function updateIngredient(id, patchIngredient) { patch({ ingredients: recipe.ingredients.map(item => item.id === id ? { ...item, ...patchIngredient } : item) }); }
+      async function addPhoto(event) {
+        const file = event.target.files?.[0];
+        if (file) patch({ photo: await fileToDataUrl(file) });
+      }
+      function updateIngredient(id, patchIngredient) {
+        patch({ ingredients: recipe.ingredients.map(item => item.id === id ? { ...item, ...patchIngredient } : item) });
+      }
       const nutrition = recipeNutrition(recipe);
-      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>{recipe.title ? "Editar receita" : "Nova receita"}</h2><section style={{ ...S.card, padding: "1rem", marginBottom: "1rem" }}><label style={S.label}>Link de origem</label><div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><select style={{ ...S.input, width: "auto" }} value={recipe.sourceType} onChange={event => patch({ sourceType: event.target.value })}>{SOURCES.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select><input style={{ ...S.input, flex: "1 1 240px" }} placeholder="Cole o link do vídeo ou post" value={recipe.sourceLink} onChange={event => patch({ sourceLink: event.target.value })} /></div><p style={{ color: "#8A7F68", fontSize: ".8rem", marginBottom: 0 }}>Para vários links, use a aba “Importar links”.</p></section><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem" }}><div><label style={S.label}>Nome da receita</label><input style={S.input} value={recipe.title} onChange={event => patch({ title: event.target.value })} /></div><div><label style={S.label}>Foto da receita</label><input style={S.input} type="file" accept="image/*" onChange={addPhoto} /></div><div><label style={S.label}>Categoria</label><select style={S.input} value={recipe.category} onChange={event => patch({ category: event.target.value })}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select></div><div><label style={S.label}>Cozinha / país</label><select style={S.input} value={recipe.cuisine} onChange={event => patch({ cuisine: event.target.value })}>{CUISINES.map(value => <option key={value}>{value}</option>)}</select></div></div>{recipe.photo && <img src={recipe.photo} alt="Prévia" style={{ maxHeight: "200px", maxWidth: "100%", borderRadius: "10px", marginTop: "1rem" }} />}<div style={{ marginTop: "1.2rem" }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><label style={S.label}>Ingredientes</label><button style={S.secondary} onClick={() => patch({ ingredients: [...recipe.ingredients, newIngredient()] })}>+ Ingrediente</button></div>{recipe.ingredients.map(item => <div key={item.id} style={{ display: "flex", flexWrap: "wrap", gap: ".45rem", marginTop: ".45rem" }}><input style={{ ...S.input, flex: "2 1 160px" }} placeholder="Ingrediente" value={item.name} onChange={event => updateIngredient(item.id, { name: event.target.value })} /><input style={{ ...S.input, flex: "1 1 75px" }} type="number" placeholder="Qtd" value={item.qty} onChange={event => updateIngredient(item.id, { qty: event.target.value })} /><select style={{ ...S.input, flex: "1 1 120px" }} value={item.unit} onChange={event => updateIngredient(item.id, { unit: event.target.value })}>{UNITS.map(unit => <option key={unit}>{unit}</option>)}</select><button style={S.danger} onClick={() => patch({ ingredients: recipe.ingredients.filter(value => value.id !== item.id) })}>×</button></div>)}{nutrition.total > 0 && <p style={{ color: "#8A7F68", fontSize: ".8rem" }}>Estimativa atual: ~{Math.round(nutrition.kcal)} kcal · {Math.round(nutrition.protein)}g proteína · {Math.round(nutrition.carbs)}g carboidratos · {Math.round(nutrition.fat)}g gorduras</p>}</div><div style={{ marginTop: "1.2rem" }}><label style={S.label}>Modo de preparo</label><textarea style={{ ...S.input, minHeight: "110px" }} value={recipe.steps} onChange={event => patch({ steps: event.target.value })} /></div><div style={{ marginTop: "1.2rem" }}><label style={S.label}>Meus comentários</label><textarea style={{ ...S.input, minHeight: "75px" }} placeholder="Ex.: reduzir o açúcar, assar por mais 5 minutos..." value={recipe.comment} onChange={event => patch({ comment: event.target.value })} /></div><div style={{ display: "flex", gap: ".6rem", marginTop: "1.5rem" }}><button style={S.primary} onClick={() => recipe.title.trim() ? save(recipe) : alert("Digite o nome da receita.")}>Salvar receita</button><button style={S.secondary} onClick={cancel}>Cancelar</button></div></div>;
+      return <div>
+        <h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>{recipe.title ? "Editar receita" : "Nova receita"}</h2>
+        <section style={{ ...S.card, padding: "1rem", marginBottom: "1rem" }}>
+          <label style={S.label}>Link de origem</label>
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+            <select style={{ ...S.input, width: "auto" }} value={recipe.sourceType} onChange={event => patch({ sourceType: event.target.value })}>{SOURCES.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select>
+            <input style={{ ...S.input, flex: "1 1 240px" }} placeholder="Cole o link do vídeo ou post" value={recipe.sourceLink} onChange={event => patch({ sourceLink: event.target.value })} />
+          </div>
+          <p style={{ color: "#8A7F68", fontSize: ".8rem", marginBottom: 0 }}>Para vários links, use a aba “Importar links”.</p>
+        </section>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem" }}>
+          <div><label style={S.label}>Nome da receita</label><input style={S.input} value={recipe.title} onChange={event => patch({ title: event.target.value })} /></div>
+          <div><label style={S.label}>Foto da receita</label><input style={S.input} type="file" accept="image/*" onChange={addPhoto} /></div>
+          <div><label style={S.label}>Categoria</label><select style={S.input} value={recipe.category} onChange={event => patch({ category: event.target.value })}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select></div>
+          <div><label style={S.label}>Cozinha / país</label><select style={S.input} value={recipe.cuisine} onChange={event => patch({ cuisine: event.target.value })}>{CUISINES.map(value => <option key={value}>{value}</option>)}</select></div>
+        </div>
+        {recipe.photo && <img src={recipe.photo} alt="Prévia" style={{ maxHeight: "200px", maxWidth: "100%", borderRadius: "10px", marginTop: "1rem" }} />}
+        <div style={{ marginTop: "1.2rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <label style={S.label}>Ingredientes</label>
+            <button style={S.secondary} onClick={() => patch({ ingredients: [...recipe.ingredients, newIngredient()] })}>+ Ingrediente</button>
+          </div>
+          {recipe.ingredients.map(item => <div key={item.id} style={{ display: "flex", flexWrap: "wrap", gap: ".45rem", marginTop: ".45rem" }}>
+            <input style={{ ...S.input, flex: "2 1 160px" }} placeholder="Ingrediente" value={item.name} onChange={event => updateIngredient(item.id, { name: event.target.value })} />
+            <input style={{ ...S.input, flex: "1 1 75px" }} type="number" placeholder="Qtd" value={item.qty} onChange={event => updateIngredient(item.id, { qty: event.target.value })} />
+            <select style={{ ...S.input, flex: "1 1 120px" }} value={item.unit} onChange={event => updateIngredient(item.id, { unit: event.target.value })}>{UNITS.map(unit => <option key={unit}>{unit}</option>)}</select>
+            <button style={S.danger} onClick={() => patch({ ingredients: recipe.ingredients.filter(value => value.id !== item.id) })}>×</button>
+          </div>)}
+          {nutrition.total > 0 && <p style={{ color: "#8A7F68", fontSize: ".8rem" }}>Estimativa atual: ~{Math.round(nutrition.kcal)} kcal · {Math.round(nutrition.protein)}g proteína · {Math.round(nutrition.carbs)}g carboidratos · {Math.round(nutrition.fat)}g gorduras</p>}
+        </div>
+        <div style={{ marginTop: "1.2rem" }}><label style={S.label}>Modo de preparo</label><textarea style={{ ...S.input, minHeight: "110px" }} value={recipe.steps} onChange={event => patch({ steps: event.target.value })} /></div>
+        <div style={{ marginTop: "1.2rem" }}><label style={S.label}>Meus comentários</label><textarea style={{ ...S.input, minHeight: "75px" }} placeholder="Ex.: reduzir o açúcar, assar por mais 5 minutos..." value={recipe.comment} onChange={event => patch({ comment: event.target.value })} /></div>
+        <div style={{ display: "flex", gap: ".6rem", marginTop: "1.5rem" }}>
+          <button style={S.primary} onClick={() => recipe.title.trim() ? save(recipe) : alert("Digite o nome da receita.")}>Salvar receita</button>
+          <button style={S.secondary} onClick={cancel}>Cancelar</button>
+        </div>
+      </div>;
     }
 
     function BulkImport({ save }) {
       const [links, setLinks] = useState("");
       const [drafts, setDrafts] = useState([]);
-      function generate() { setDrafts(links.split("\n").map(link => link.trim()).filter(Boolean).map(link => ({ ...newRecipe(), sourceLink: link, sourceType: sourceFromUrl(link) }))); }
+      function generate() {
+        const parsed = links
+          .split("\n")
+          .map(link => link.trim())
+          .filter(Boolean)
+          .map(link => ({ ...newRecipe(), sourceLink: link, sourceType: sourceFromUrl(link) }));
+        setDrafts(parsed);
+      }
       function patch(id, fields) { setDrafts(current => current.map(recipe => recipe.id === id ? { ...recipe, ...fields } : recipe)); }
-      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Importar vários links</h2><p style={{ color: "#8A7F68" }}>Cole um link por linha. O site identifica a fonte e cria um rascunho para cada receita. Para preencher automaticamente foto, ingredientes e preparo a partir do vídeo, será preciso integrar uma API de IA/backend em uma próxima versão.</p><textarea style={{ ...S.input, minHeight: "120px" }} placeholder={"https://www.tiktok.com/...\nhttps://www.instagram.com/reel/...\nhttps://www.youtube.com/watch?v=..."} value={links} onChange={event => setLinks(event.target.value)} /><div style={{ marginTop: ".7rem" }}><button style={S.primary} onClick={generate}>Gerar rascunhos</button></div><div style={{ display: "grid", gap: "1rem", marginTop: "1.3rem" }}>{drafts.map(recipe => <section key={recipe.id} style={{ ...S.card, padding: "1rem" }}><span style={S.tag("#E7E1D2", "#5B5140")}>{SOURCES.find(source => source.id === recipe.sourceType)?.label}</span><p style={{ wordBreak: "break-all", fontSize: ".8rem", color: "#A8432B" }}>{recipe.sourceLink}</p><label style={S.label}>Nome da receita</label><input style={S.input} value={recipe.title} onChange={event => patch(recipe.id, { title: event.target.value })} /><label style={{ ...S.label, marginTop: ".7rem" }}>Categoria</label><select style={S.input} value={recipe.category} onChange={event => patch(recipe.id, { category: event.target.value })}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select><label style={{ ...S.label, marginTop: ".7rem" }}>Modo de preparo</label><textarea style={{ ...S.input, minHeight: "70px" }} value={recipe.steps} onChange={event => patch(recipe.id, { steps: event.target.value })} /><div style={{ marginTop: ".7rem" }}><button style={S.danger} onClick={() => setDrafts(current => current.filter(item => item.id !== recipe.id))}>Remover rascunho</button></div></section>)}</div>{drafts.length > 0 && <button style={{ ...S.primary, marginTop: "1rem" }} onClick={() => { const valid = drafts.filter(recipe => recipe.title.trim()); valid.length ? save(valid) : alert("Preencha o nome de pelo menos uma receita."); }}>Salvar receitas preenchidas</button>}</div>;
+      return <div>
+        <h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Importar vários links</h2>
+        <p style={{ color: "#8A7F68" }}>Cole um link por linha. O sistema detecta a plataforma e cria rascunhos editáveis. Não há scraping automático de vídeos do TikTok/Instagram/Pinterest/YouTube nesta versão.</p>
+        <textarea style={{ ...S.input, minHeight: "120px" }} placeholder={"https://www.tiktok.com/...\nhttps://www.instagram.com/reel/...\nhttps://www.youtube.com/watch?v=..."} value={links} onChange={event => setLinks(event.target.value)} />
+        <div style={{ marginTop: ".7rem" }}><button style={S.primary} onClick={generate}>Gerar rascunhos</button></div>
+        <div style={{ display: "grid", gap: "1rem", marginTop: "1.3rem" }}>
+          {drafts.map(recipe => <section key={recipe.id} style={{ ...S.card, padding: "1rem" }}>
+            <span style={S.tag("#E7E1D2", "#5B5140")}>{SOURCES.find(source => source.id === recipe.sourceType)?.label}</span>
+            <p style={{ wordBreak: "break-all", fontSize: ".8rem", color: "#A8432B" }}>{recipe.sourceLink}</p>
+            <label style={S.label}>Nome da receita</label>
+            <input style={S.input} value={recipe.title} onChange={event => patch(recipe.id, { title: event.target.value })} />
+            <label style={{ ...S.label, marginTop: ".7rem" }}>Categoria</label>
+            <select style={S.input} value={recipe.category} onChange={event => patch(recipe.id, { category: event.target.value })}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select>
+            <label style={{ ...S.label, marginTop: ".7rem" }}>Modo de preparo</label>
+            <textarea style={{ ...S.input, minHeight: "70px" }} value={recipe.steps} onChange={event => patch(recipe.id, { steps: event.target.value })} />
+            <div style={{ marginTop: ".7rem" }}><button style={S.danger} onClick={() => setDrafts(current => current.filter(item => item.id !== recipe.id))}>Remover rascunho</button></div>
+          </section>)}
+        </div>
+        {drafts.length > 0 && <button style={{ ...S.primary, marginTop: "1rem" }} onClick={() => {
+          const valid = drafts.filter(recipe => recipe.title.trim());
+          valid.length ? save(valid) : alert("Preencha o nome de pelo menos uma receita.");
+        }}>Salvar receitas preenchidas</button>}
+      </div>;
     }
 
-    function Backup({ exportBackup, importBackup }) {
-      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Backup dos seus dados</h2><p style={{ color: "#8A7F68", maxWidth: "680px" }}>As receitas, fotos e estoque ficam armazenados neste navegador. Baixe um backup periodicamente para não perder seus dados e para transferi-los a outro celular ou computador.</p><div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap" }}><button style={S.primary} onClick={exportBackup}>Exportar backup (.json)</button><label style={{ ...S.secondary, display: "inline-block" }}>Importar backup<input type="file" accept="application/json" onChange={importBackup} style={{ display: "none" }} /></label></div></div>;
+    function Backup({ exportBackup, importBackup, accessToken, syncNow }) {
+      return <div>
+        <h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Backup dos seus dados</h2>
+        <p style={{ color: "#8A7F68", maxWidth: "720px" }}>
+          O Google Drive sincroniza automaticamente com sua pasta privada <b>appDataFolder</b> quando você está conectada.
+          A regra de versão usa <code>updatedAt</code>: a cópia mais recente vence. Se o backup remoto estiver mais novo, o sistema pede confirmação antes de restaurar para evitar sobrescrever sem aviso.
+        </p>
+        <div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap" }}>
+          {accessToken && <button style={S.secondary} onClick={syncNow}>Sincronizar agora</button>}
+          <button style={S.primary} onClick={exportBackup}>Exportar backup (.json)</button>
+          <label style={{ ...S.secondary, display: "inline-block" }}>Importar backup
+            <input type="file" accept="application/json" onChange={importBackup} style={{ display: "none" }} />
+          </label>
+        </div>
+      </div>;
     }
 
     ReactDOM.createRoot(document.getElementById("root")).render(<App />);
