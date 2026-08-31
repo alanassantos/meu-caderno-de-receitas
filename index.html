@@ -1,1 +1,295 @@
-<HTML_REAL_43473_CHARS>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meu Caderno de Receitas</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Source Sans 3', 'Segoe UI', sans-serif; }
+    button, input, select, textarea { font-family: inherit; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback } = React;
+
+    const CATEGORIES = ["Doce", "Salgado", "Frio", "Quente", "Bebida", "Lanche"];
+    const CUISINES = ["Brasileira", "Italiana", "Japonesa", "Mexicana", "Francesa", "Árabe", "Indiana", "Outra"];
+    const UNITS = ["un", "g", "kg", "ml", "l", "colher (sopa)", "colher (chá)", "xícara", "pitada", "dente", "fatia"];
+    const SOURCES = [
+      { id: "tiktok", label: "TikTok" }, { id: "instagram", label: "Instagram" },
+      { id: "pinterest", label: "Pinterest" }, { id: "youtube", label: "YouTube" },
+      { id: "outro", label: "Outro / próprio" }
+    ];
+
+    const NUTRITION = {
+      "acucar": [387, 0, 100, 0], "açúcar": [387, 0, 100, 0], "arroz": [130, 2.7, 28, 0.3],
+      "feijao": [127, 8.7, 22.8, 0.5], "feijão": [127, 8.7, 22.8, 0.5],
+      "farinha de trigo": [364, 10, 76, 1], "ovo": [155, 13, 1.1, 11], "ovos": [155, 13, 1.1, 11],
+      "leite": [61, 3.2, 4.8, 3.3], "leite condensado": [321, 7.9, 54.4, 8.7],
+      "manteiga": [717, 0.9, 0.1, 81], "oleo": [884, 0, 0, 100], "óleo": [884, 0, 0, 100],
+      "azeite": [884, 0, 0, 100], "queijo": [402, 25, 1.3, 33], "frango": [239, 27, 0, 14],
+      "peito de frango": [165, 31, 0, 3.6], "carne moida": [250, 26, 0, 15], "carne moída": [250, 26, 0, 15],
+      "batata": [77, 2, 17, 0.1], "cenoura": [41, 0.9, 10, 0.2], "tomate": [18, 0.9, 3.9, 0.2],
+      "cebola": [40, 1.1, 9.3, 0.1], "alho": [149, 6.4, 33, 0.5], "chocolate": [546, 4.9, 61, 31],
+      "macarrao": [131, 5, 25, 1.1], "macarrão": [131, 5, 25, 1.1], "pao": [265, 9, 49, 3.2],
+      "pão": [265, 9, 49, 3.2], "iogurte": [61, 3.5, 4.7, 3.3], "creme de leite": [292, 2.4, 3.7, 30],
+      "banana": [89, 1.1, 23, 0.3], "maca": [52, 0.3, 14, 0.2], "maçã": [52, 0.3, 14, 0.2],
+      "mel": [304, 0.3, 82, 0], "aveia": [389, 17, 66, 7], "peixe": [206, 22, 0, 12],
+      "camarao": [99, 24, 0.2, 0.3], "camarão": [99, 24, 0.2, 0.3], "presunto": [145, 21, 1.5, 6],
+      "bacon": [541, 37, 1.4, 42]
+    };
+
+    const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const normalize = (value) => (value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+    const newIngredient = () => ({ id: uid(), name: "", qty: "", unit: "g" });
+    const newRecipe = () => ({
+      id: uid(), title: "", category: "Doce", cuisine: "Brasileira", photo: "", tested: false,
+      comment: "", ingredients: [], steps: "", sourceType: "outro", sourceLink: "", createdAt: Date.now()
+    });
+
+    function readStorage(key, fallback) {
+      try { const content = localStorage.getItem(key); return content ? JSON.parse(content) : fallback; }
+      catch { return fallback; }
+    }
+    function writeStorage(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); }
+      catch { alert("Não foi possível salvar. Tente usar imagens menores ou faça um backup."); }
+    }
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+    function sourceFromUrl(url) {
+      const text = url.toLowerCase();
+      if (text.includes("tiktok")) return "tiktok";
+      if (text.includes("instagram")) return "instagram";
+      if (text.includes("pinterest") || text.includes("pin.it")) return "pinterest";
+      if (text.includes("youtube") || text.includes("youtu.be")) return "youtube";
+      return "outro";
+    }
+    function nutritionForIngredient(ingredient) {
+      const name = normalize(ingredient.name);
+      let values = NUTRITION[name];
+      if (!values) {
+        const found = Object.keys(NUTRITION).find(key => name.includes(normalize(key)) || normalize(key).includes(name));
+        values = found ? NUTRITION[found] : null;
+      }
+      if (!values) return null;
+      let grams = Number(ingredient.qty) || 0;
+      if (ingredient.unit === "kg" || ingredient.unit === "l") grams *= 1000;
+      if (ingredient.unit === "colher (sopa)") grams *= 15;
+      if (ingredient.unit === "colher (chá)") grams *= 5;
+      if (ingredient.unit === "xícara") grams *= 240;
+      if (ingredient.unit === "pitada") grams *= 0.5;
+      if (ingredient.unit === "un" || ingredient.unit === "dente" || ingredient.unit === "fatia") grams *= 50;
+      const factor = grams / 100;
+      return { kcal: values[0] * factor, protein: values[1] * factor, carbs: values[2] * factor, fat: values[3] * factor };
+    }
+    function recipeNutrition(recipe) {
+      let totals = { kcal: 0, protein: 0, carbs: 0, fat: 0, matched: 0, total: recipe.ingredients.length };
+      recipe.ingredients.forEach(ingredient => {
+        const data = nutritionForIngredient(ingredient);
+        if (data) {
+          totals.kcal += data.kcal; totals.protein += data.protein;
+          totals.carbs += data.carbs; totals.fat += data.fat; totals.matched++;
+        }
+      });
+      return totals;
+    }
+
+    const S = {
+      page: { minHeight: "100vh", background: "#F7F1E4", color: "#2B2620", paddingBottom: "3rem" },
+      header: { background: "#2B2620", color: "#F7F1E4", padding: "1.75rem 1.5rem 1.25rem" },
+      title: { fontFamily: "Fraunces, Georgia, serif", fontSize: "1.9rem", fontWeight: 600, margin: 0 },
+      subtitle: { margin: ".3rem 0 0", color: "#C9BFA8", fontSize: ".95rem" },
+      nav: { background: "#2B2620", padding: "1rem 1.5rem 0", display: "flex", gap: ".4rem", flexWrap: "wrap" },
+      navBtn: active => ({ border: "none", padding: ".55rem 1rem", borderRadius: "8px 8px 0 0", cursor: "pointer", fontWeight: 700, background: active ? "#F7F1E4" : "transparent", color: active ? "#2B2620" : "#C9BFA8" }),
+      wrap: { maxWidth: "1000px", margin: "0 auto", padding: "1.5rem" },
+      card: { background: "#FFFDF8", border: "1px solid #E4D9C2", borderRadius: "12px", overflow: "hidden" },
+      input: { width: "100%", padding: ".55rem .65rem", border: "1px solid #D8CCB0", borderRadius: "8px", background: "#FFFDF8", fontSize: ".94rem" },
+      label: { display: "block", fontSize: ".8rem", fontWeight: 700, color: "#5B5140", marginBottom: ".25rem" },
+      primary: { background: "#A8432B", color: "#FFF8EE", border: "none", padding: ".6rem 1rem", borderRadius: "8px", fontWeight: 700, cursor: "pointer" },
+      secondary: { background: "transparent", color: "#2B2620", border: "1px solid #D8CCB0", padding: ".6rem 1rem", borderRadius: "8px", fontWeight: 700, cursor: "pointer" },
+      danger: { background: "transparent", color: "#A8432B", border: "1px solid #E4D9C2", padding: ".5rem .8rem", borderRadius: "8px", fontWeight: 700, cursor: "pointer" },
+      tag: (background, color) => ({ display: "inline-block", padding: ".15rem .55rem", borderRadius: "99px", fontSize: ".72rem", fontWeight: 700, background, color })
+    };
+
+    function NutritionCard({ recipe }) {
+      const data = recipeNutrition(recipe);
+      if (!data.total) return null;
+      const rows = [
+        ["Calorias", Math.round(data.kcal), "kcal", "#A8432B", 800],
+        ["Proteína", Math.round(data.protein), "g", "#7B4FA6", 60],
+        ["Carboidratos", Math.round(data.carbs), "g", "#3B7DBF", 120],
+        ["Gorduras", Math.round(data.fat), "g", "#4E8C57", 60]
+      ];
+      return <div style={{ ...S.card, padding: "1rem", marginBottom: "1rem" }}>
+        <div style={S.label}>Estimativa nutricional — receita completa</div>
+        {rows.map(([label, value, unit, color, max]) => <div key={label} style={{ display: "flex", alignItems: "center", gap: ".6rem", marginTop: ".5rem" }}>
+          <div style={{ width: "110px", fontSize: ".84rem", fontWeight: 700 }}>{label}</div>
+          <div style={{ height: "8px", flex: 1, background: "#EEE3CC", borderRadius: "8px", overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.min(100, value / max * 100)}%`, background: color }} /></div>
+          <div style={{ width: "72px", textAlign: "right", fontWeight: 700 }}>{value} {unit}</div>
+        </div>)}
+        <p style={{ color: "#8A7F68", fontSize: ".73rem", margin: ".7rem 0 0" }}>Estimativa baseada nos ingredientes reconhecidos ({data.matched}/{data.total}). Não substitui rótulo ou orientação nutricional.</p>
+      </div>;
+    }
+
+    function App() {
+      const [recipes, setRecipes] = useState([]);
+      const [stock, setStock] = useState([]);
+      const [tab, setTab] = useState("receitas");
+      const [selectedId, setSelectedId] = useState(null);
+      const [editing, setEditing] = useState(null);
+      const [search, setSearch] = useState("");
+      const [category, setCategory] = useState("Todas");
+      const [cuisine, setCuisine] = useState("Todas");
+      const [tested, setTested] = useState("todas");
+      const [makeable, setMakeable] = useState(false);
+      const [shopping, setShopping] = useState([]);
+      const [checked, setChecked] = useState({});
+
+      useEffect(() => { setRecipes(readStorage("recipe_book_recipes", [])); setStock(readStorage("recipe_book_stock", [])); }, []);
+      useEffect(() => { writeStorage("recipe_book_recipes", recipes); }, [recipes]);
+      useEffect(() => { writeStorage("recipe_book_stock", stock); }, [stock]);
+
+      const stockMap = useMemo(() => Object.fromEntries(stock.map(item => [normalize(item.name), item])), [stock]);
+      const missing = useCallback(recipe => recipe.ingredients.filter(ingredient => {
+        const available = stockMap[normalize(ingredient.name)];
+        if (!available) return true;
+        const have = Number(available.qty) || 0, need = Number(ingredient.qty) || 0;
+        return available.unit === ingredient.unit ? have < need : have <= 0;
+      }), [stockMap]);
+
+      const shownRecipes = useMemo(() => recipes.filter(recipe => {
+        if (category !== "Todas" && recipe.category !== category) return false;
+        if (cuisine !== "Todas" && recipe.cuisine !== cuisine) return false;
+        if (tested === "testadas" && !recipe.tested) return false;
+        if (tested === "nao-testadas" && recipe.tested) return false;
+        if (makeable && missing(recipe).length) return false;
+        return !search || normalize(recipe.title).includes(normalize(search));
+      }), [recipes, category, cuisine, tested, makeable, search, missing]);
+
+      const shoppingItems = useMemo(() => {
+        const result = {};
+        recipes.filter(recipe => shopping.includes(recipe.id)).forEach(recipe => missing(recipe).forEach(ingredient => {
+          const key = normalize(ingredient.name) + "|" + ingredient.unit;
+          if (!result[key]) result[key] = { ...ingredient, qty: 0, recipes: [] };
+          result[key].qty += Number(ingredient.qty) || 0;
+          if (!result[key].recipes.includes(recipe.title)) result[key].recipes.push(recipe.title || "Sem título");
+        }));
+        return Object.values(result);
+      }, [recipes, shopping, missing]);
+
+      function saveRecipe(recipe) {
+        setRecipes(current => current.some(item => item.id === recipe.id) ? current.map(item => item.id === recipe.id ? recipe : item) : [recipe, ...current]);
+        setEditing(null); setTab("receitas");
+      }
+      function removeRecipe(id) { if (confirm("Excluir esta receita?")) { setRecipes(current => current.filter(recipe => recipe.id !== id)); setSelectedId(null); } }
+      function saveMultiple(newRecipes) { setRecipes(current => [...newRecipes, ...current]); setTab("receitas"); }
+      function exportBackup() {
+        const blob = new Blob([JSON.stringify({ recipes, stock }, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob), link = document.createElement("a");
+        link.href = url; link.download = "backup-meu-caderno-de-receitas.json"; link.click(); URL.revokeObjectURL(url);
+      }
+      function importBackup(event) {
+        const file = event.target.files?.[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => { try { const data = JSON.parse(reader.result); if (data.recipes) setRecipes(data.recipes); if (data.stock) setStock(data.stock); alert("Backup importado!"); } catch { alert("Arquivo inválido."); } };
+        reader.readAsText(file);
+      }
+      const selected = recipes.find(recipe => recipe.id === selectedId);
+      const tabs = [["receitas", "Receitas"], ["estoque", "Estoque"], ["lista", "Lista de compras"], ["nova", "Nova receita"], ["importar", "Importar links"], ["backup", "Backup"]];
+      return <div style={S.page}>
+        <header style={S.header}><h1 style={S.title}>Meu caderno de receitas</h1><p style={S.subtitle}>Receitas, estoque, calorias e lista de compras em um só lugar</p></header>
+        <nav style={S.nav}>{tabs.map(([id, label]) => <button key={id} style={S.navBtn(tab === id)} onClick={() => { setTab(id); setSelectedId(null); if (id === "nova") setEditing(newRecipe()); }}>{label}</button>)}</nav>
+        <main style={S.wrap}>
+          {tab === "receitas" && !selected && <RecipeGrid recipes={shownRecipes} total={recipes.length} missing={missing} search={search} setSearch={setSearch} category={category} setCategory={setCategory} cuisine={cuisine} setCuisine={setCuisine} tested={tested} setTested={setTested} makeable={makeable} setMakeable={setMakeable} open={setSelectedId} />}
+          {tab === "receitas" && selected && <RecipeDetail recipe={selected} missing={missing(selected)} back={() => setSelectedId(null)} edit={() => { setEditing(selected); setTab("nova"); }} remove={() => removeRecipe(selected.id)} toggle={() => setRecipes(current => current.map(recipe => recipe.id === selected.id ? { ...recipe, tested: !recipe.tested } : recipe))} addShopping={() => { setShopping(current => current.includes(selected.id) ? current : [...current, selected.id]); setTab("lista"); }} />}
+          {tab === "estoque" && <Stock stock={stock} setStock={setStock} />}
+          {tab === "lista" && <Shopping recipes={recipes} shopping={shopping} setShopping={setShopping} items={shoppingItems} checked={checked} setChecked={setChecked} />}
+          {tab === "nova" && editing && <RecipeForm recipe={editing} setRecipe={setEditing} save={saveRecipe} cancel={() => { setEditing(null); setTab("receitas"); }} />}
+          {tab === "importar" && <BulkImport save={saveMultiple} />}
+          {tab === "backup" && <Backup exportBackup={exportBackup} importBackup={importBackup} />}
+        </main>
+      </div>;
+    }
+
+    function RecipeGrid({ recipes, total, missing, search, setSearch, category, setCategory, cuisine, setCuisine, tested, setTested, makeable, setMakeable, open }) {
+      return <div>
+        <div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap", alignItems: "center" }}>
+          <input style={{ ...S.input, maxWidth: "220px" }} placeholder="Buscar receita" value={search} onChange={event => setSearch(event.target.value)} />
+          <select style={{ ...S.input, width: "auto" }} value={category} onChange={event => setCategory(event.target.value)}><option>Todas</option>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select>
+          <select style={{ ...S.input, width: "auto" }} value={cuisine} onChange={event => setCuisine(event.target.value)}><option>Todas</option>{CUISINES.map(value => <option key={value}>{value}</option>)}</select>
+          <select style={{ ...S.input, width: "auto" }} value={tested} onChange={event => setTested(event.target.value)}><option value="todas">Testadas ou não</option><option value="testadas">Já testadas</option><option value="nao-testadas">Não testadas</option></select>
+          <label style={{ display: "flex", alignItems: "center", gap: ".35rem", fontWeight: 700, fontSize: ".88rem" }}><input type="checkbox" checked={makeable} onChange={event => setMakeable(event.target.checked)} /> Só receitas possíveis</label>
+        </div>
+        {!total && <p style={{ color: "#8A7F68", marginTop: "2rem" }}>Ainda não há receitas. Use “Nova receita” ou “Importar links” para começar.</p>}
+        {!!total && !recipes.length && <p style={{ color: "#8A7F68", marginTop: "2rem" }}>Nenhuma receita encontrada com esses filtros.</p>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "1rem", marginTop: "1.25rem" }}>
+          {recipes.map(recipe => { const absent = missing(recipe), nutrition = recipeNutrition(recipe); return <article key={recipe.id} onClick={() => open(recipe.id)} style={{ ...S.card, cursor: "pointer" }}>
+            <div style={{ height: "130px", background: recipe.photo ? `url(${recipe.photo}) center/cover` : "#EEE3CC", display: "grid", placeItems: "center", color: "#B7A87F", fontSize: ".8rem" }}>{!recipe.photo && "Sem foto"}</div>
+            <div style={{ padding: ".8rem" }}><div style={{ display: "flex", gap: ".35rem", flexWrap: "wrap", marginBottom: ".45rem" }}><span style={S.tag("#F1E3C6", "#7A5A17")}>{recipe.category}</span><span style={S.tag("#E7E1D2", "#5B5140")}>{recipe.cuisine}</span>{recipe.tested && <span style={S.tag("#DCEBD8", "#356534")}>Testada</span>}</div>
+            <div style={{ fontWeight: 700, fontSize: "1.04rem" }}>{recipe.title || "Sem título"}</div><div style={{ color: absent.length ? "#A8432B" : "#356534", fontSize: ".79rem", marginTop: ".3rem" }}>{absent.length ? `Faltam ${absent.length} ingrediente(s)` : "Você tem tudo"}</div>{nutrition.total > 0 && <div style={{ color: "#8A7F68", fontSize: ".78rem", marginTop: ".2rem" }}>~{Math.round(nutrition.kcal)} kcal</div>}</div>
+          </article>; })}
+        </div>
+      </div>;
+    }
+
+    function RecipeDetail({ recipe, missing, back, edit, remove, toggle, addShopping }) {
+      return <div><button style={S.secondary} onClick={back}>← Voltar</button><section style={{ ...S.card, marginTop: "1rem", padding: "1.25rem" }}>
+        {recipe.photo && <img src={recipe.photo} alt={recipe.title} style={{ width: "100%", maxHeight: "320px", objectFit: "cover", borderRadius: "10px", marginBottom: "1rem" }} />}
+        <div style={{ display: "flex", gap: ".4rem", flexWrap: "wrap" }}><span style={S.tag("#F1E3C6", "#7A5A17")}>{recipe.category}</span><span style={S.tag("#E7E1D2", "#5B5140")}>{recipe.cuisine}</span>{recipe.tested && <span style={S.tag("#DCEBD8", "#356534")}>Testada</span>}</div>
+        <h2 style={{ fontFamily: "Fraunces, Georgia, serif", margin: ".7rem 0" }}>{recipe.title}</h2><NutritionCard recipe={recipe} />
+        <h3>Ingredientes</h3><ul>{recipe.ingredients.map(item => <li key={item.id} style={{ color: missing.some(absent => absent.id === item.id) ? "#A8432B" : "inherit", margin: ".25rem 0" }}>{item.qty} {item.unit} de {item.name} {missing.some(absent => absent.id === item.id) && "· falta"}</li>)}</ul>
+        {recipe.steps && <><h3>Modo de preparo</h3><p style={{ whiteSpace: "pre-wrap" }}>{recipe.steps}</p></>}
+        {recipe.comment && <><h3>Meus comentários</h3><p style={{ whiteSpace: "pre-wrap", fontStyle: "italic" }}>{recipe.comment}</p></>}
+        {recipe.sourceLink && <p><b>Fonte:</b> <a href={recipe.sourceLink} target="_blank" rel="noreferrer" style={{ color: "#A8432B" }}>{SOURCES.find(item => item.id === recipe.sourceType)?.label || "Abrir link original"}</a></p>}
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: "1rem" }}><button style={S.primary} onClick={toggle}>{recipe.tested ? "Marcar como não testada" : "Marcar como testada"}</button><button style={S.secondary} onClick={addShopping}>Adicionar à lista</button><button style={S.secondary} onClick={edit}>Editar</button><button style={S.danger} onClick={remove}>Excluir</button></div>
+      </section></div>;
+    }
+
+    function Stock({ stock, setStock }) {
+      function update(id, patch) { setStock(current => current.map(item => item.id === id ? { ...item, ...patch } : item)); }
+      return <div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}><h2 style={{ fontFamily: "Fraunces, Georgia, serif", margin: 0 }}>O que tenho em casa</h2><button style={S.primary} onClick={() => setStock(current => [...current, { id: uid(), name: "", qty: "", unit: "g" }])}>+ Adicionar</button></div><p style={{ color: "#8A7F68" }}>Cadastre os ingredientes e as quantidades disponíveis. O site cruza isso com as receitas.</p>{!stock.length && <p style={{ color: "#8A7F68" }}>Seu estoque está vazio.</p>}<div style={{ display: "grid", gap: ".5rem" }}>{stock.map(item => <div key={item.id} style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><input style={{ ...S.input, flex: "2 1 180px" }} placeholder="Ingrediente" value={item.name} onChange={event => update(item.id, { name: event.target.value })} /><input style={{ ...S.input, flex: "1 1 80px" }} type="number" placeholder="Qtd" value={item.qty} onChange={event => update(item.id, { qty: event.target.value })} /><select style={{ ...S.input, flex: "1 1 110px" }} value={item.unit} onChange={event => update(item.id, { unit: event.target.value })}>{UNITS.map(unit => <option key={unit}>{unit}</option>)}</select><button style={S.danger} onClick={() => setStock(current => current.filter(value => value.id !== item.id))}>Remover</button></div>)}</div></div>;
+    }
+
+    function Shopping({ recipes, shopping, setShopping, items, checked, setChecked }) {
+      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Lista de compras</h2><p style={{ color: "#8A7F68" }}>Selecione as receitas. A lista mostra somente o que falta e para qual receita serve.</p><div style={{ display: "flex", flexWrap: "wrap", gap: ".4rem", marginBottom: "1.2rem" }}>{recipes.map(recipe => <button key={recipe.id} style={shopping.includes(recipe.id) ? S.primary : S.secondary} onClick={() => setShopping(current => current.includes(recipe.id) ? current.filter(id => id !== recipe.id) : [...current, recipe.id])}>{recipe.title || "Sem título"}</button>)}</div>{!items.length && <p style={{ color: "#8A7F68" }}>Selecione receitas acima para gerar a lista.</p>}<div style={{ display: "grid", gap: ".5rem" }}>{items.map((item, index) => { const key = `${item.name}|${item.unit}`, done = checked[key]; return <label key={index} style={{ ...S.card, padding: ".7rem .9rem", display: "flex", gap: ".7rem", alignItems: "center", opacity: done ? .55 : 1 }}><input type="checkbox" checked={!!done} onChange={event => setChecked(current => ({ ...current, [key]: event.target.checked }))} /><div><div style={{ fontWeight: 700, textDecoration: done ? "line-through" : "none" }}>{item.qty} {item.unit} de {item.name}</div><div style={{ fontSize: ".78rem", color: "#8A7F68" }}>Para: {item.recipes.join(", ")}</div></div></label>; })}</div></div>;
+    }
+
+    function RecipeForm({ recipe, setRecipe, save, cancel }) {
+      function patch(fields) { setRecipe(current => ({ ...current, ...fields })); }
+      async function addPhoto(event) { const file = event.target.files?.[0]; if (file) patch({ photo: await fileToDataUrl(file) }); }
+      function updateIngredient(id, patchIngredient) { patch({ ingredients: recipe.ingredients.map(item => item.id === id ? { ...item, ...patchIngredient } : item) }); }
+      const nutrition = recipeNutrition(recipe);
+      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>{recipe.title ? "Editar receita" : "Nova receita"}</h2><section style={{ ...S.card, padding: "1rem", marginBottom: "1rem" }}><label style={S.label}>Link de origem</label><div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><select style={{ ...S.input, width: "auto" }} value={recipe.sourceType} onChange={event => patch({ sourceType: event.target.value })}>{SOURCES.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select><input style={{ ...S.input, flex: "1 1 240px" }} placeholder="Cole o link do vídeo ou post" value={recipe.sourceLink} onChange={event => patch({ sourceLink: event.target.value })} /></div><p style={{ color: "#8A7F68", fontSize: ".8rem", marginBottom: 0 }}>Para vários links, use a aba “Importar links”.</p></section><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem" }}><div><label style={S.label}>Nome da receita</label><input style={S.input} value={recipe.title} onChange={event => patch({ title: event.target.value })} /></div><div><label style={S.label}>Foto da receita</label><input style={S.input} type="file" accept="image/*" onChange={addPhoto} /></div><div><label style={S.label}>Categoria</label><select style={S.input} value={recipe.category} onChange={event => patch({ category: event.target.value })}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select></div><div><label style={S.label}>Cozinha / país</label><select style={S.input} value={recipe.cuisine} onChange={event => patch({ cuisine: event.target.value })}>{CUISINES.map(value => <option key={value}>{value}</option>)}</select></div></div>{recipe.photo && <img src={recipe.photo} alt="Prévia" style={{ maxHeight: "200px", maxWidth: "100%", borderRadius: "10px", marginTop: "1rem" }} />}<div style={{ marginTop: "1.2rem" }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><label style={S.label}>Ingredientes</label><button style={S.secondary} onClick={() => patch({ ingredients: [...recipe.ingredients, newIngredient()] })}>+ Ingrediente</button></div>{recipe.ingredients.map(item => <div key={item.id} style={{ display: "flex", flexWrap: "wrap", gap: ".45rem", marginTop: ".45rem" }}><input style={{ ...S.input, flex: "2 1 160px" }} placeholder="Ingrediente" value={item.name} onChange={event => updateIngredient(item.id, { name: event.target.value })} /><input style={{ ...S.input, flex: "1 1 75px" }} type="number" placeholder="Qtd" value={item.qty} onChange={event => updateIngredient(item.id, { qty: event.target.value })} /><select style={{ ...S.input, flex: "1 1 120px" }} value={item.unit} onChange={event => updateIngredient(item.id, { unit: event.target.value })}>{UNITS.map(unit => <option key={unit}>{unit}</option>)}</select><button style={S.danger} onClick={() => patch({ ingredients: recipe.ingredients.filter(value => value.id !== item.id) })}>×</button></div>)}{nutrition.total > 0 && <p style={{ color: "#8A7F68", fontSize: ".8rem" }}>Estimativa atual: ~{Math.round(nutrition.kcal)} kcal · {Math.round(nutrition.protein)}g proteína · {Math.round(nutrition.carbs)}g carboidratos · {Math.round(nutrition.fat)}g gorduras</p>}</div><div style={{ marginTop: "1.2rem" }}><label style={S.label}>Modo de preparo</label><textarea style={{ ...S.input, minHeight: "110px" }} value={recipe.steps} onChange={event => patch({ steps: event.target.value })} /></div><div style={{ marginTop: "1.2rem" }}><label style={S.label}>Meus comentários</label><textarea style={{ ...S.input, minHeight: "75px" }} placeholder="Ex.: reduzir o açúcar, assar por mais 5 minutos..." value={recipe.comment} onChange={event => patch({ comment: event.target.value })} /></div><div style={{ display: "flex", gap: ".6rem", marginTop: "1.5rem" }}><button style={S.primary} onClick={() => recipe.title.trim() ? save(recipe) : alert("Digite o nome da receita.")}>Salvar receita</button><button style={S.secondary} onClick={cancel}>Cancelar</button></div></div>;
+    }
+
+    function BulkImport({ save }) {
+      const [links, setLinks] = useState("");
+      const [drafts, setDrafts] = useState([]);
+      function generate() { setDrafts(links.split("\n").map(link => link.trim()).filter(Boolean).map(link => ({ ...newRecipe(), sourceLink: link, sourceType: sourceFromUrl(link) }))); }
+      function patch(id, fields) { setDrafts(current => current.map(recipe => recipe.id === id ? { ...recipe, ...fields } : recipe)); }
+      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Importar vários links</h2><p style={{ color: "#8A7F68" }}>Cole um link por linha. O site identifica a fonte e cria um rascunho para cada receita. Para preencher automaticamente foto, ingredientes e preparo a partir do vídeo, será preciso integrar uma API de IA/backend em uma próxima versão.</p><textarea style={{ ...S.input, minHeight: "120px" }} placeholder={"https://www.tiktok.com/...\nhttps://www.instagram.com/reel/...\nhttps://www.youtube.com/watch?v=..."} value={links} onChange={event => setLinks(event.target.value)} /><div style={{ marginTop: ".7rem" }}><button style={S.primary} onClick={generate}>Gerar rascunhos</button></div><div style={{ display: "grid", gap: "1rem", marginTop: "1.3rem" }}>{drafts.map(recipe => <section key={recipe.id} style={{ ...S.card, padding: "1rem" }}><span style={S.tag("#E7E1D2", "#5B5140")}>{SOURCES.find(source => source.id === recipe.sourceType)?.label}</span><p style={{ wordBreak: "break-all", fontSize: ".8rem", color: "#A8432B" }}>{recipe.sourceLink}</p><label style={S.label}>Nome da receita</label><input style={S.input} value={recipe.title} onChange={event => patch(recipe.id, { title: event.target.value })} /><label style={{ ...S.label, marginTop: ".7rem" }}>Categoria</label><select style={S.input} value={recipe.category} onChange={event => patch(recipe.id, { category: event.target.value })}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select><label style={{ ...S.label, marginTop: ".7rem" }}>Modo de preparo</label><textarea style={{ ...S.input, minHeight: "70px" }} value={recipe.steps} onChange={event => patch(recipe.id, { steps: event.target.value })} /><div style={{ marginTop: ".7rem" }}><button style={S.danger} onClick={() => setDrafts(current => current.filter(item => item.id !== recipe.id))}>Remover rascunho</button></div></section>)}</div>{drafts.length > 0 && <button style={{ ...S.primary, marginTop: "1rem" }} onClick={() => { const valid = drafts.filter(recipe => recipe.title.trim()); valid.length ? save(valid) : alert("Preencha o nome de pelo menos uma receita."); }}>Salvar receitas preenchidas</button>}</div>;
+    }
+
+    function Backup({ exportBackup, importBackup }) {
+      return <div><h2 style={{ fontFamily: "Fraunces, Georgia, serif", marginTop: 0 }}>Backup dos seus dados</h2><p style={{ color: "#8A7F68", maxWidth: "680px" }}>As receitas, fotos e estoque ficam armazenados neste navegador. Baixe um backup periodicamente para não perder seus dados e para transferi-los a outro celular ou computador.</p><div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap" }}><button style={S.primary} onClick={exportBackup}>Exportar backup (.json)</button><label style={{ ...S.secondary, display: "inline-block" }}>Importar backup<input type="file" accept="application/json" onChange={importBackup} style={{ display: "none" }} /></label></div></div>;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
